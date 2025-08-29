@@ -221,13 +221,15 @@ def check_and_forward_tweets():
     logger.info(f"Processed {len(new_tweets)} new tweets")
     return len(new_tweets)
 
-# ... all your existing code ...
-
-# Remove or comment out the main() function and replace with:
+# At the very bottom of twitter_bot.py - KEEP THIS:
 def main():
     logger.info(f"Starting bot for @{TWITTER_TARGET_USER}...")
-    check_and_forward_tweets()
+    while True:
+        check_and_forward_tweets()
+        logger.info(f"Next check in {CHECK_INTERVAL} seconds...")
+        time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
-    main()
+    main()  # ← DON'T CHANGE THIS!
+
 

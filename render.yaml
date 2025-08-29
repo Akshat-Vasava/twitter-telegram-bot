@@ -1,0 +1,18 @@
+services:
+  - type: worker
+    name: twitter-telegram-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python twitter_bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: TWITTER_BEARER_TOKEN
+        sync: false
+      - key: CHECK_INTERVAL
+        value: "900"
+      - key: MAX_TWEETS_PER_CHECK
+        value: "5"

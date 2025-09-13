@@ -4,7 +4,7 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    # Remove startCommand since we're using Procfile
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false

@@ -1,3 +1,4 @@
+import keep_alive  # Add this at the very top
 from flask import Flask
 import threading
 import time

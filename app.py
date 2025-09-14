@@ -7,8 +7,11 @@ from twitter_bot import check_and_forward_tweets, CHECK_INTERVAL, logger as bot_
 
 app = Flask(__name__)
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
+# Setup logging - Match the format from twitter_bot.py for consistency
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Global variable to track if bot thread is running
@@ -22,9 +25,13 @@ def bot_worker():
     logger.info("✅ Bot worker thread started successfully!")
     bot_logger.info("✅ Bot worker thread started successfully!")
     
+    # Add a small delay to ensure Flask app is fully ready
+    time.sleep(2)
+    
     # Initial check immediately
     logger.info("🔄 Performing initial tweet check...")
-    check_and_forward_tweets()
+    initial_count = check_and_forward_tweets()
+    logger.info(f"✅ Initial check completed. Processed {initial_count} tweets.")
     
     # Then continue with regular intervals
     while True:
@@ -32,7 +39,11 @@ def bot_worker():
             logger.info(f"💤 Sleeping for {CHECK_INTERVAL} seconds...")
             time.sleep(CHECK_INTERVAL)
             logger.info("🔄 Checking for new tweets...")
-            check_and_forward_tweets()
+            tweet_count = check_and_forward_tweets()
+            if tweet_count > 0:
+                logger.info(f"✅ Processed {tweet_count} new tweets")
+            else:
+                logger.info("✅ No new tweets found")
         except Exception as e:
             logger.error(f"❌ Error in bot worker: {e}")
             bot_logger.error(f"❌ Error in bot worker: {e}")
@@ -53,39 +64,65 @@ start_bot_thread()
 
 @app.route('/')
 def home():
-    return "Twitter-to-Telegram Bot is running! Bot thread should be active."
+    return """
+    <h1>Twitter-to-Telegram Bot is Running! 🚀</h1>
+    <p>Endpoints:</p>
+    <ul>
+        <li><a href="/health">/health</a> - Health check</li>
+        <li><a href="/bot-status">/bot-status</a> - Bot thread status</li>
+        <li><a href="/trigger-check">/trigger-check</a> - Manual tweet check</li>
+    </ul>
+    """
 
 @app.route('/health')
 def health():
-    return "OK"
+    """Health check endpoint for Koyeb"""
+    global bot_thread_started, bot_thread
+    if bot_thread and bot_thread.is_alive():
+        return "OK", 200
+    else:
+        return "Bot thread not running", 500
 
 @app.route('/bot-status')
 def bot_status():
     """Check if bot thread is running"""
     global bot_thread_started, bot_thread
-    status = f"Bot thread started: {bot_thread_started}"
-    if bot_thread:
-        status += f", Alive: {bot_thread.is_alive()}"
+    status = {
+        "bot_thread_started": bot_thread_started,
+        "bot_thread_alive": bot_thread.is_alive() if bot_thread else False,
+        "check_interval_seconds": CHECK_INTERVAL,
+        "data_directory": os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data'),
+        "log_directory": os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+    }
     return status
-
-@app.route('/start-bot')
-def manual_start():
-    """Manually start the bot thread"""
-    if start_bot_thread():
-        return "Bot thread started manually!"
-    return "Bot thread already running or starting..."
 
 @app.route('/trigger-check')
 def trigger_check():
     """Manually trigger a tweet check"""
     try:
         result = check_and_forward_tweets()
-        return f"Manual check completed. Processed {result} tweets."
+        return {
+            "status": "success",
+            "message": f"Manual check completed",
+            "tweets_processed": result
+        }
     except Exception as e:
-        return f"Error during manual check: {e}"
+        return {
+            "status": "error",
+            "message": f"Error during manual check: {e}"
+        }, 500
 
 # For Koyeb deployment
 if __name__ == '__main__':
+    # Ensure data and logs directories exist before starting
+    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+    os.makedirs(data_dir, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
+    
+    logger.info(f"Data directory: {data_dir}")
+    logger.info(f"Log directory: {log_dir}")
+    
     start_bot_thread()
     port = int(os.environ.get('PORT', 8000))
     app.run(host='0.0.0.0', port=port)

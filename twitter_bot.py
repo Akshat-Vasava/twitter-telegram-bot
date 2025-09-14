@@ -232,79 +232,97 @@ def process_tweet(tweet, media_data=None):
     }
 
 def check_and_forward_tweets():
-    """Main function to check and process tweets"""
-    global last_check_time
+    """Main function to check and process tweets with file-based locking"""
+    lock_file = os.path.join(DATA_DIR, 'bot.lock')
     
-    # Prevent simultaneous execution from both workers (5-minute cooldown)
-    current_time = time.time()
-    if current_time - last_check_time < 300:
-        logger.info("Skipping check - another thread recently processed tweets")
+    # Create file-based lock to prevent simultaneous execution
+    try:
+        # Try to create a lock file (atomic operation)
+        fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+    except FileExistsError:
+        # Lock file already exists = another process is running
+        logger.info("Skipping check - another process is already running")
+        return 0
+    except Exception as e:
+        logger.error(f"Error creating lock file: {e}")
         return 0
     
-    last_check_time = current_time
-    logger.info(f"Checking for new media tweets from @{TWITTER_TARGET_USER}...")
-    
-    processed_tweets = load_processed_tweets()
-    user_id = get_user_id(TWITTER_TARGET_USER)
-    
-    if not user_id:
-        logger.error(f"Could not get user ID for @{TWITTER_TARGET_USER}")
-        return 0
-    
-    # Get the newest tweet ID from processed tweets to use as since_id
-    since_id = max(processed_tweets) if processed_tweets else None
-    
-    # Pass since_id to the API call to get only NEW tweets
-    tweets_data = get_recent_tweets(user_id, since_id)
-    if not tweets_data or 'data' not in tweets_data:
-        logger.info("No new tweets found")
-        return 0
-    
-    new_tweets = []
-    newly_processed = set(processed_tweets)  # Create a copy to modify
-    
-    for tweet in tweets_data['data']:
-        if tweet['id'] not in processed_tweets:
-            processed_tweet = process_tweet(tweet, tweets_data)
-            if processed_tweet:
-                new_tweets.append(processed_tweet)
-            newly_processed.add(tweet['id'])
-    
-    tweets_processed = len(new_tweets)
-    
-    for tweet in new_tweets:
-        caption = tweet['text']
+    try:
+        logger.info(f"Checking for new media tweets from @{TWITTER_TARGET_USER}...")
         
-        for i, media in enumerate(tweet['media_urls']):
-            media_ext = '.mp4' if media['type'] == 'video' else '.jpg'
-            media_filename = f"/tmp/temp_{tweet['id']}_{i}{media_ext}"
+        processed_tweets = load_processed_tweets()
+        user_id = get_user_id(TWITTER_TARGET_USER)
+        
+        if not user_id:
+            logger.error(f"Could not get user ID for @{TWITTER_TARGET_USER}")
+            return 0
+        
+        # Get the newest tweet ID from processed tweets to use as since_id
+        since_id = max(processed_tweets) if processed_tweets else None
+        
+        if since_id:
+            logger.info(f"Using since_id: {since_id} to fetch only new tweets")
+        
+        # Pass since_id to the API call to get only NEW tweets
+        tweets_data = get_recent_tweets(user_id, since_id)
+        if not tweets_data or 'data' not in tweets_data:
+            logger.info("No new tweets found")
+            return 0
+        
+        new_tweets = []
+        newly_processed = set(processed_tweets)  # Create a copy to modify
+        
+        for tweet in tweets_data['data']:
+            if tweet['id'] not in processed_tweets:
+                processed_tweet = process_tweet(tweet, tweets_data)
+                if processed_tweet:
+                    new_tweets.append(processed_tweet)
+                newly_processed.add(tweet['id'])
+        
+        tweets_processed = len(new_tweets)
+        
+        for tweet in new_tweets:
+            caption = tweet['text']
             
-            if download_media(media['url'], media_filename):
-                is_photo = media['type'] == 'photo'
-                media_caption = caption if i == 0 else None
+            for i, media in enumerate(tweet['media_urls']):
+                media_ext = '.mp4' if media['type'] == 'video' else '.jpg'
+                media_filename = f"/tmp/temp_{tweet['id']}_{i}{media_ext}"
                 
-                if send_media_to_telegram(media_filename, caption=media_caption, is_photo=is_photo):
-                    logger.info(f"Successfully sent {media['type']} for tweet: {tweet['id']}")
-                else:
-                    logger.error(f"Failed to send {media['type']} for tweet: {tweet['id']}")
-                
-                try:
-                    os.remove(media_filename)
-                except Exception as e:
-                    logger.warning(f"Could not remove temp file {media_filename}: {e}")
-                
-                time.sleep(1)
+                if download_media(media['url'], media_filename):
+                    is_photo = media['type'] == 'photo'
+                    media_caption = caption if i == 0 else None
+                    
+                    if send_media_to_telegram(media_filename, caption=media_caption, is_photo=is_photo):
+                        logger.info(f"Successfully sent {media['type']} for tweet: {tweet['id']}")
+                    else:
+                        logger.error(f"Failed to send {media['type']} for tweet: {tweet['id']}")
+                    
+                    try:
+                        os.remove(media_filename)
+                    except Exception as e:
+                        logger.warning(f"Could not remove temp file {media_filename}: {e}")
+                    
+                    time.sleep(1)
+            
+            time.sleep(2)
         
-        time.sleep(2)
-    
-    # Only save if we actually processed new tweets
-    if tweets_processed > 0:
-        save_processed_tweets(newly_processed)
-    
-    logger.info(f"Processing complete. Found {tweets_processed} new media tweets from @{TWITTER_TARGET_USER}")
-    return tweets_processed
+        # Only save if we actually processed new tweets
+        if tweets_processed > 0:
+            save_processed_tweets(newly_processed)
+        
+        logger.info(f"Processing complete. Found {tweets_processed} new media tweets from @{TWITTER_TARGET_USER}")
+        return tweets_processed
+        
+    finally:
+        # Always remove the lock file, even if an error occurs
+        try:
+            os.remove(lock_file)
+        except:
+            pass
 
 # Export these for app.py to use
 if __name__ == "__main__":
     # This allows running twitter_bot.py directly for testing
     check_and_forward_tweets()
+

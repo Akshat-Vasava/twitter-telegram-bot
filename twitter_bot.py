@@ -17,9 +17,20 @@ TWITTER_TARGET_USER = "AboutNodKrai"
 CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', 900))
 MAX_TWEETS_PER_CHECK = int(os.getenv('MAX_TWEETS_PER_CHECK', 5))
 
-# Use /tmp directory for Koyeb ephemeral storage
-DATA_FILE = '/tmp/processed_tweets.txt'
-LOG_FILE = '/tmp/bot.log'
+# Get the base directory of the project
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Use PERSISTENT directories for data and logs
+DATA_DIR = os.path.join(BASE_DIR, 'data')
+LOG_DIR = os.path.join(BASE_DIR, 'logs')
+
+# Create directories if they don't exist
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# Define file paths
+DATA_FILE = os.path.join(DATA_DIR, 'processed_tweets.txt')
+LOG_FILE = os.path.join(LOG_DIR, 'bot.log')
 
 # Validate required settings
 required_vars = [
@@ -43,25 +54,40 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Log startup information
+logger.info("=" * 50)
+logger.info("Twitter-to-Telegram Bot Starting Up")
+logger.info(f"Data file: {DATA_FILE}")
+logger.info(f"Log file: {LOG_FILE}")
+logger.info("=" * 50)
+
 # Initialize Telegram bot
 telegram_bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
 def load_processed_tweets():
+    """Load processed tweet IDs from persistent file"""
     processed_tweets = set()
     try:
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, 'r') as f:
                 for line in f:
-                    processed_tweets.add(line.strip())
+                    tweet_id = line.strip()
+                    if tweet_id:  # Skip empty lines
+                        processed_tweets.add(tweet_id)
+            logger.info(f"Loaded {len(processed_tweets)} processed tweet IDs from storage")
+        else:
+            logger.info("No existing data file found. Starting fresh.")
     except Exception as e:
         logger.error(f"Error loading processed tweets: {e}")
     return processed_tweets
 
 def save_processed_tweets(processed_tweets):
+    """Save processed tweet IDs to persistent file"""
     try:
         with open(DATA_FILE, 'w') as f:
             for tweet_id in processed_tweets:
                 f.write(f"{tweet_id}\n")
+        logger.info(f"Saved {len(processed_tweets)} tweet IDs to persistent storage")
     except Exception as e:
         logger.error(f"Error saving processed tweets: {e}")
 
@@ -211,13 +237,16 @@ def check_and_forward_tweets():
         return 0
     
     new_tweets = []
+    newly_processed = set(processed_tweets)  # Create a copy to modify
     
     for tweet in tweets_data['data']:
         if tweet['id'] not in processed_tweets:
             processed_tweet = process_tweet(tweet, tweets_data)
             if processed_tweet:
                 new_tweets.append(processed_tweet)
-            processed_tweets.add(tweet['id'])
+            newly_processed.add(tweet['id'])
+    
+    tweets_processed = len(new_tweets)
     
     for tweet in new_tweets:
         caption = tweet['text']
@@ -231,20 +260,25 @@ def check_and_forward_tweets():
                 media_caption = caption if i == 0 else None
                 
                 if send_media_to_telegram(media_filename, caption=media_caption, is_photo=is_photo):
-                    logger.info(f"Sent {media['type']} for tweet: {tweet['id']}")
+                    logger.info(f"Successfully sent {media['type']} for tweet: {tweet['id']}")
+                else:
+                    logger.error(f"Failed to send {media['type']} for tweet: {tweet['id']}")
                 
                 try:
                     os.remove(media_filename)
-                except:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Could not remove temp file {media_filename}: {e}")
                 
                 time.sleep(1)
         
         time.sleep(2)
     
-    save_processed_tweets(processed_tweets)
-    logger.info(f"Processed {len(new_tweets)} new media tweets from @{TWITTER_TARGET_USER}")
-    return len(new_tweets)
+    # Only save if we actually processed new tweets
+    if tweets_processed > 0:
+        save_processed_tweets(newly_processed)
+    
+    logger.info(f"Processing complete. Found {tweets_processed} new media tweets from @{TWITTER_TARGET_USER}")
+    return tweets_processed
 
 # Export these for app.py to use
 if __name__ == "__main__":

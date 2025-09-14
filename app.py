@@ -2,6 +2,7 @@ from flask import Flask
 import threading
 import time
 import logging
+import os
 from twitter_bot import check_and_forward_tweets, CHECK_INTERVAL, logger as bot_logger
 
 app = Flask(__name__)
@@ -12,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 # Global variable to track if bot thread is running
 bot_thread_started = False
+bot_thread = None
 
 def bot_worker():
     """Background thread that runs the bot"""
@@ -20,22 +22,38 @@ def bot_worker():
     logger.info("✅ Bot worker thread started successfully!")
     bot_logger.info("✅ Bot worker thread started successfully!")
     
+    # Initial check immediately
+    logger.info("🔄 Performing initial tweet check...")
+    check_and_forward_tweets()
+    
+    # Then continue with regular intervals
     while True:
         try:
-            logger.info("🔄 Checking for new tweets...")
-            bot_logger.info("🔄 Checking for new tweets...")
-            check_and_forward_tweets()
             logger.info(f"💤 Sleeping for {CHECK_INTERVAL} seconds...")
-            bot_logger.info(f"💤 Sleeping for {CHECK_INTERVAL} seconds...")
             time.sleep(CHECK_INTERVAL)
+            logger.info("🔄 Checking for new tweets...")
+            check_and_forward_tweets()
         except Exception as e:
             logger.error(f"❌ Error in bot worker: {e}")
             bot_logger.error(f"❌ Error in bot worker: {e}")
-            time.sleep(60)
+            time.sleep(60)  # Wait before retrying
+
+def start_bot_thread():
+    """Start the bot thread"""
+    global bot_thread, bot_thread_started
+    if not bot_thread_started and (bot_thread is None or not bot_thread.is_alive()):
+        logger.info("🚀 Starting bot thread...")
+        bot_thread = threading.Thread(target=bot_worker, daemon=True)
+        bot_thread.start()
+        return True
+    return False
+
+# Start the bot thread when the app imports this module
+start_bot_thread()
 
 @app.route('/')
 def home():
-    return "Twitter-to-Telegram Bot is running! Bot thread is active."
+    return "Twitter-to-Telegram Bot is running! Bot thread should be active."
 
 @app.route('/health')
 def health():
@@ -44,10 +62,30 @@ def health():
 @app.route('/bot-status')
 def bot_status():
     """Check if bot thread is running"""
-    return f"Bot thread started: {bot_thread_started}"
+    global bot_thread_started, bot_thread
+    status = f"Bot thread started: {bot_thread_started}"
+    if bot_thread:
+        status += f", Alive: {bot_thread.is_alive()}"
+    return status
 
-# Start the bot thread when the app loads
+@app.route('/start-bot')
+def manual_start():
+    """Manually start the bot thread"""
+    if start_bot_thread():
+        return "Bot thread started manually!"
+    return "Bot thread already running or starting..."
+
+@app.route('/trigger-check')
+def trigger_check():
+    """Manually trigger a tweet check"""
+    try:
+        result = check_and_forward_tweets()
+        return f"Manual check completed. Processed {result} tweets."
+    except Exception as e:
+        return f"Error during manual check: {e}"
+
+# For Koyeb deployment
 if __name__ == '__main__':
-    bot_thread = threading.Thread(target=bot_worker, daemon=True)
-    bot_thread.start()
-    app.run(host='0.0.0.0', port=5000)
+    start_bot_thread()
+    port = int(os.environ.get('PORT', 8000))
+    app.run(host='0.0.0.0', port=port)

@@ -4,7 +4,7 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    # Remove startCommand since we're using Procfile
+    startCommand: gunicorn --bind 0.0.0.0:$PORT app:app
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
@@ -16,3 +16,5 @@ services:
         value: "900"
       - key: MAX_TWEETS_PER_CHECK
         value: "5"
+      - key: PORT
+        value: "8000"

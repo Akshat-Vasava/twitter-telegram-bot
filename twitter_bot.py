@@ -23,14 +23,20 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Use PERSISTENT directories for data and logs
 DATA_DIR = os.path.join(BASE_DIR, 'data')
 LOG_DIR = os.path.join(BASE_DIR, 'logs')
+TEMP_DIR = os.path.join(BASE_DIR, 'temp')
 
 # Create directories if they don't exist
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(TEMP_DIR, exist_ok=True)
 
 # Define file paths
 DATA_FILE = os.path.join(DATA_DIR, 'processed_tweets.txt')
 LOG_FILE = os.path.join(LOG_DIR, 'bot.log')
+
+# Rate limit tracking
+last_api_call = 0
+RATE_LIMIT_DELAY = 2  # seconds between API calls
 
 # Validate required settings
 required_vars = [
@@ -54,21 +60,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Log startup information
-logger.info("=" * 50)
-logger.info("Twitter-to-Telegram Bot Starting Up")
-logger.info(f"Data file: {DATA_FILE}")
-logger.info(f"Log file: {LOG_FILE}")
-logger.info("=" * 50)
-
 # Initialize Telegram bot
 telegram_bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
-# Global variable to prevent simultaneous checks from both workers
-last_check_time = 0
+def enforce_rate_limit():
+    """Respect Twitter API rate limits"""
+    global last_api_call
+    current_time = time.time()
+    elapsed = current_time - last_api_call
+    
+    if elapsed < RATE_LIMIT_DELAY:
+        sleep_time = RATE_LIMIT_DELAY - elapsed
+        time.sleep(sleep_time)
+    
+    last_api_call = time.time()
 
 def load_processed_tweets():
-    """Load processed tweet IDs from persistent file"""
+    """Load processed tweets from file"""
     processed_tweets = set()
     try:
         if os.path.exists(DATA_FILE):
@@ -77,28 +85,28 @@ def load_processed_tweets():
                     tweet_id = line.strip()
                     if tweet_id:  # Skip empty lines
                         processed_tweets.add(tweet_id)
-            logger.info(f"Loaded {len(processed_tweets)} processed tweet IDs from storage")
-        else:
-            logger.info("No existing data file found. Starting fresh.")
+            logger.info(f"Loaded {len(processed_tweets)} processed tweet IDs")
     except Exception as e:
         logger.error(f"Error loading processed tweets: {e}")
     return processed_tweets
 
 def save_processed_tweets(processed_tweets):
-    """Save processed tweet IDs to persistent file"""
+    """Save processed tweets to file"""
     try:
         with open(DATA_FILE, 'w') as f:
             for tweet_id in processed_tweets:
                 f.write(f"{tweet_id}\n")
-        logger.info(f"Saved {len(processed_tweets)} tweet IDs to persistent storage")
+        logger.info(f"Saved {len(processed_tweets)} tweet IDs to storage")
     except Exception as e:
         logger.error(f"Error saving processed tweets: {e}")
 
 def get_user_id(username):
+    """Get Twitter user ID from username"""
     url = f"https://api.twitter.com/2/users/by/username/{username}"
     headers = {"Authorization": f"Bearer {TWITTER_BEARER_TOKEN}"}
     
     try:
+        enforce_rate_limit()
         response = requests.get(url, headers=headers, timeout=10)
         
         if response.status_code == 429:
@@ -114,7 +122,7 @@ def get_user_id(username):
         return None
 
 def get_recent_tweets(user_id, since_id=None):
-    """Fetch recent tweets, optionally only those newer than since_id"""
+    """Get recent tweets from a user with rate limit handling"""
     url = f"https://api.twitter.com/2/users/{user_id}/tweets"
     headers = {"Authorization": f"Bearer {TWITTER_BEARER_TOKEN}"}
     
@@ -123,15 +131,16 @@ def get_recent_tweets(user_id, since_id=None):
         "tweet.fields": "created_at,attachments,entities,text,referenced_tweets",
         "expansions": "attachments.media_keys",
         "media.fields": "url,type,preview_image_url,variants",
-        "exclude": "retweets,replies"  # Exclude retweets and replies
+        "exclude": "retweets,replies"
     }
     
-    # CRITICAL: Add since_id parameter if provided to get only NEW tweets
+    # Add since_id parameter to get only NEW tweets
     if since_id:
         params["since_id"] = since_id
         logger.info(f"Using since_id: {since_id} to fetch only new tweets")
     
     try:
+        enforce_rate_limit()
         response = requests.get(url, headers=headers, params=params, timeout=15)
         
         if response.status_code == 429:
@@ -146,6 +155,7 @@ def get_recent_tweets(user_id, since_id=None):
         return None
 
 def download_media(media_url, filename):
+    """Download media from URL"""
     try:
         response = requests.get(media_url, timeout=30)
         response.raise_for_status()
@@ -157,6 +167,7 @@ def download_media(media_url, filename):
         return False
 
 def send_media_to_telegram(media_path, caption=None, is_photo=True):
+    """Send media to Telegram with caption"""
     try:
         with open(media_path, 'rb') as media:
             if is_photo:
@@ -174,11 +185,13 @@ def send_media_to_telegram(media_path, caption=None, is_photo=True):
         return False
 
 def clean_tweet_text(text):
+    """Clean tweet text by removing URLs and unwanted content"""
     text = re.sub(r'http\S+', '', text)
     text = re.sub(r'pic\.twitter\.com/\S+', '', text)
     return re.sub(r'\s+', ' ', text).strip()
 
 def is_retweet(tweet):
+    """Check if a tweet is a retweet"""
     if 'referenced_tweets' in tweet:
         for ref_tweet in tweet['referenced_tweets']:
             if ref_tweet['type'] == 'retweeted':
@@ -186,6 +199,7 @@ def is_retweet(tweet):
     return False
 
 def process_tweet(tweet, media_data=None):
+    """Process a single tweet and extract relevant data"""
     if is_retweet(tweet):
         logger.info(f"Skipping retweet: {tweet['id']}")
         return None
@@ -231,17 +245,26 @@ def process_tweet(tweet, media_data=None):
         'media_urls': media_urls
     }
 
+def cleanup_temp_files():
+    """Clean up temporary files older than 1 hour"""
+    try:
+        now = time.time()
+        for filename in os.listdir(TEMP_DIR):
+            file_path = os.path.join(TEMP_DIR, filename)
+            if os.path.isfile(file_path) and now - os.path.getctime(file_path) > 3600:
+                os.remove(file_path)
+    except Exception as e:
+        logger.error(f"Error cleaning up temp files: {e}")
+
 def check_and_forward_tweets():
-    """Main function to check and process tweets with file-based locking"""
+    """Check for new media tweets and forward them to Telegram"""
     lock_file = os.path.join(DATA_DIR, 'bot.lock')
     
     # Create file-based lock to prevent simultaneous execution
     try:
-        # Try to create a lock file (atomic operation)
         fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         os.close(fd)
     except FileExistsError:
-        # Lock file already exists = another process is running
         logger.info("Skipping check - another process is already running")
         return 0
     except Exception as e:
@@ -258,20 +281,17 @@ def check_and_forward_tweets():
             logger.error(f"Could not get user ID for @{TWITTER_TARGET_USER}")
             return 0
         
-        # Get the newest tweet ID from processed tweets to use as since_id
+        # Get the newest tweet ID to use as since_id
         since_id = max(processed_tweets) if processed_tweets else None
         
-        if since_id:
-            logger.info(f"Using since_id: {since_id} to fetch only new tweets")
-        
-        # Pass since_id to the API call to get only NEW tweets
+        # Get tweets (only new ones if since_id is available)
         tweets_data = get_recent_tweets(user_id, since_id)
         if not tweets_data or 'data' not in tweets_data:
             logger.info("No new tweets found")
             return 0
         
         new_tweets = []
-        newly_processed = set(processed_tweets)  # Create a copy to modify
+        newly_processed = set(processed_tweets)
         
         for tweet in tweets_data['data']:
             if tweet['id'] not in processed_tweets:
@@ -280,14 +300,13 @@ def check_and_forward_tweets():
                     new_tweets.append(processed_tweet)
                 newly_processed.add(tweet['id'])
         
-        tweets_processed = len(new_tweets)
-        
-        for tweet in new_tweets:
+        # Process tweets in chronological order (oldest first)
+        for tweet in reversed(new_tweets):
             caption = tweet['text']
             
             for i, media in enumerate(tweet['media_urls']):
                 media_ext = '.mp4' if media['type'] == 'video' else '.jpg'
-                media_filename = f"/tmp/temp_{tweet['id']}_{i}{media_ext}"
+                media_filename = os.path.join(TEMP_DIR, f"temp_{tweet['id']}_{i}{media_ext}")
                 
                 if download_media(media['url'], media_filename):
                     is_photo = media['type'] == 'photo'
@@ -295,34 +314,31 @@ def check_and_forward_tweets():
                     
                     if send_media_to_telegram(media_filename, caption=media_caption, is_photo=is_photo):
                         logger.info(f"Successfully sent {media['type']} for tweet: {tweet['id']}")
-                    else:
-                        logger.error(f"Failed to send {media['type']} for tweet: {tweet['id']}")
                     
                     try:
                         os.remove(media_filename)
                     except Exception as e:
-                        logger.warning(f"Could not remove temp file {media_filename}: {e}")
+                        logger.warning(f"Could not remove temp file: {e}")
                     
                     time.sleep(1)
             
             time.sleep(2)
         
-        # Only save if we actually processed new tweets
-        if tweets_processed > 0:
+        if new_tweets:
             save_processed_tweets(newly_processed)
         
-        logger.info(f"Processing complete. Found {tweets_processed} new media tweets from @{TWITTER_TARGET_USER}")
-        return tweets_processed
+        logger.info(f"Processing complete. Found {len(new_tweets)} new media tweets")
+        return len(new_tweets)
         
     finally:
-        # Always remove the lock file, even if an error occurs
+        # Always remove the lock file
         try:
             os.remove(lock_file)
         except:
             pass
+        cleanup_temp_files()
 
-# Export these for app.py to use
+# Export for app.py to use
 if __name__ == "__main__":
     # This allows running twitter_bot.py directly for testing
     check_and_forward_tweets()
-

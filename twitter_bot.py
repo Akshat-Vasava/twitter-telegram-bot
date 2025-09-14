@@ -64,6 +64,9 @@ logger.info("=" * 50)
 # Initialize Telegram bot
 telegram_bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
+# Global variable to prevent simultaneous checks from both workers
+last_check_time = 0
+
 def load_processed_tweets():
     """Load processed tweet IDs from persistent file"""
     processed_tweets = set()
@@ -110,7 +113,8 @@ def get_user_id(username):
         logger.error(f"Error fetching user ID: {e}")
         return None
 
-def get_recent_tweets(user_id):
+def get_recent_tweets(user_id, since_id=None):
+    """Fetch recent tweets, optionally only those newer than since_id"""
     url = f"https://api.twitter.com/2/users/{user_id}/tweets"
     headers = {"Authorization": f"Bearer {TWITTER_BEARER_TOKEN}"}
     
@@ -118,8 +122,14 @@ def get_recent_tweets(user_id):
         "max_results": MAX_TWEETS_PER_CHECK,
         "tweet.fields": "created_at,attachments,entities,text,referenced_tweets",
         "expansions": "attachments.media_keys",
-        "media.fields": "url,type,preview_image_url,variants"
+        "media.fields": "url,type,preview_image_url,variants",
+        "exclude": "retweets,replies"  # Exclude retweets and replies
     }
+    
+    # CRITICAL: Add since_id parameter if provided to get only NEW tweets
+    if since_id:
+        params["since_id"] = since_id
+        logger.info(f"Using since_id: {since_id} to fetch only new tweets")
     
     try:
         response = requests.get(url, headers=headers, params=params, timeout=15)
@@ -127,7 +137,7 @@ def get_recent_tweets(user_id):
         if response.status_code == 429:
             logger.warning("Rate limit hit. Waiting 15 minutes...")
             time.sleep(900)
-            return get_recent_tweets(user_id)
+            return get_recent_tweets(user_id, since_id)
         
         response.raise_for_status()
         return response.json()
@@ -222,6 +232,16 @@ def process_tweet(tweet, media_data=None):
     }
 
 def check_and_forward_tweets():
+    """Main function to check and process tweets"""
+    global last_check_time
+    
+    # Prevent simultaneous execution from both workers (5-minute cooldown)
+    current_time = time.time()
+    if current_time - last_check_time < 300:
+        logger.info("Skipping check - another thread recently processed tweets")
+        return 0
+    
+    last_check_time = current_time
     logger.info(f"Checking for new media tweets from @{TWITTER_TARGET_USER}...")
     
     processed_tweets = load_processed_tweets()
@@ -231,9 +251,13 @@ def check_and_forward_tweets():
         logger.error(f"Could not get user ID for @{TWITTER_TARGET_USER}")
         return 0
     
-    tweets_data = get_recent_tweets(user_id)
+    # Get the newest tweet ID from processed tweets to use as since_id
+    since_id = max(processed_tweets) if processed_tweets else None
+    
+    # Pass since_id to the API call to get only NEW tweets
+    tweets_data = get_recent_tweets(user_id, since_id)
     if not tweets_data or 'data' not in tweets_data:
-        logger.info("No tweets data received or no new tweets")
+        logger.info("No new tweets found")
         return 0
     
     new_tweets = []

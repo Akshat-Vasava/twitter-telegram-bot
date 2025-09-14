@@ -245,3 +245,8 @@ def check_and_forward_tweets():
     save_processed_tweets(processed_tweets)
     logger.info(f"Processed {len(new_tweets)} new media tweets from @{TWITTER_TARGET_USER}")
     return len(new_tweets)
+
+# Export these for app.py to use
+if __name__ == "__main__":
+    # This allows running twitter_bot.py directly for testing
+    check_and_forward_tweets()
